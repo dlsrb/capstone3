@@ -1,0 +1,5 @@
+naver_key.txt
+.idea/
+__pycache__/
+data/raw/
+data/processed/
