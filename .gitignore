@@ -3,3 +3,5 @@ naver_key.txt
 __pycache__/
 data/raw/
 data/processed/
+# 기사 원문 문장이 들어 있어 공개하지 않음 (README 2.4)
+data/labeling/

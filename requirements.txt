@@ -6,3 +6,4 @@ kiwipiepy
 google-play-scraper
 selenium
 requests
+beautifulsoup4
