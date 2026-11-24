@@ -16,6 +16,13 @@
                      골라 data/labeling/positive_candidates.csv 로 저장 → label 열을 채운다.
                      (후보일 뿐 실제 라벨은 판단 규칙대로. 부정·중립·관계없음도 나올 수 있다)
 
+  MODE = "recheck"   [판단 기준 단순화, 2026-11-23] "저출생 관련해서 좋은 얘기면 긍정, 나쁜 얘기면 부정"
+                     기존 label_set.csv에서 지금 '중립'이면서 좋고 나쁨을 나타내는 표현(증가·감소·최저·부담·효과 등)이
+                     있는 문장만 data/labeling/recheck_tone.csv 로 저장 → new_label 열을 새 기준으로 채운다.
+                     (표현이 없는 중립 문장은 사실·계획 전달일 가능성이 높아 그대로 둔다)
+
+  MODE = "apply"     recheck_perception.csv의 new_label을 label_set.csv에 반영 (원래 라벨은 old_label 열에 보관)
+
   MODE = "add"       라벨을 채운 positive_candidates.csv를 label_set.csv에 합친다.
                      sample_group = "positive_boost" 로 표시 (테스트셋에서는 제외할 것)
 
@@ -27,9 +34,9 @@ from pathlib import Path
 
 import pandas as pd
 
-MODE = "blind"          # "blind" → (직접 라벨) → "check" / "positive" → (라벨) → "add"
+MODE = "add"        # blind → check (완료) / recheck → apply / positive → add
 N_BLIND = 200
-N_POSITIVE = 400
+N_POSITIVE = 200          # 기준 단순화로 긍정이 자연스럽게 늘어나 400 → 200
 MAX_PER_ARTICLE = 3
 SEED = 7                 # 04(SEED=42)와 다른 값
 
@@ -39,21 +46,37 @@ LABEL_CSV = LABEL_DIR / "label_set.csv"
 SENT_CSV = ROOT / "data" / "processed" / "sentences.csv"
 BLIND_CSV = LABEL_DIR / "blind_200.csv"
 POS_CSV = LABEL_DIR / "positive_candidates.csv"
+RECHECK_CSV = LABEL_DIR / "recheck_tone.csv"
 LABELS = ["긍정", "부정", "중립", "관계없음"]
+
+# 좋고 나쁨(논조)을 나타내는 표현 (기준 단순화 후 다시 볼 중립 문장 찾기용, AI 판단 아님)
+TONE = re.compile(
+    r"증가|늘|감소|줄|최저|최고|반등|하락|급감|급락|떨어|올랐|상승|회복|개선|악화|부담|어려|힘들|포기|위기|심각|"
+    r"우려|기대|효과|도움|호응|만족|인기|몰려|긍정|부정적|반가|환영|불만|반발|꺼리|기피|부족|사각지대|한계|그쳤|불과|실패|성과"
+)
 
 # 저출생 대책과 관련된 문장인지 (03의 POLICY_TOPIC + 정책 영역 키워드를 간단히 합친 것)
 TOPIC = re.compile(
-    r"저출생|저출산|출산율|출생아|인구\s*(정책|전략)|부모\s*급여|아동\s*수당|첫만남|출산\s*(지원금|장려금|휴가)|"
+    r"저출생|저출산|출산율|출생아|인구\s*(?:정책|전략)|부모\s*급여|아동\s*수당|첫만남|출산\s*(?:지원금|장려금|휴가)|"
     r"육아\s*휴직|어린이집|보육|늘봄|돌봄|유보\s*통합|신혼\s*부부|특례\s*대출|난임|다자녀|일\s*[·ㆍ]?\s*가정\s*양립|"
-    r"양육|가사\s*(관리사|도우미)|만남\s*(행사|프로그램)"
+    r"양육|가사\s*(?:관리사|도우미)|만남\s*(?:행사|프로그램)"
 )
 # 긍정 평가 표현
 POS_CUE = re.compile(
-    r"효과를\s*(거두|보|냈|내고)|효과가\s*(있|크|컸|나타)|호응|도움이\s*(되|됐|된)|성과를\s*(거두|냈|내고)|"
-    r"환영|기여|덕분|긍정적|호평|만족|반가|인기|몰려|실효성(이|을)?\s*(있|높|입증)|힘을\s*보|고무적|바람직"
+    r"효과를\s*(?:거두|보|냈|내고)|효과가\s*(?:있|크|컸|나타)|호응|도움이\s*(?:되|됐|된)|성과를\s*(?:거두|냈|내고)|"
+    r"환영|기여|덕분|긍정적|호평|만족|반가|인기|몰려|실효성(?:이|을)?\s*(?:있|높|입증)|힘을\s*보|고무적|바람직"
 )
 # 부정 표현 (같이 있으면 긍정일 가능성이 낮아 후보에서 제외)
 NEG_CUE = re.compile(r"미미|없었|없다|못했|못한|부족|한계|그쳤|그친|불과|우려|비판|역부족|실패|문제|논란")
+
+
+SHORT = {"긍": "긍정", "부": "부정", "중": "중립", "관": "관계없음", "x": "관계없음", "X": "관계없음"}
+
+
+def norm(col):
+    """라벨 정리: 공백 제거 + 한 글자 입력(긍/부/중/관) 허용"""
+    col = col.fillna("").str.replace(r"\s+", "", regex=True)
+    return col.map(lambda v: SHORT.get(v, v))
 
 
 def cohen_kappa(a, b):
@@ -126,15 +149,55 @@ def positive():
     out[cols].to_csv(POS_CSV, index=False, encoding="utf-8-sig")
     print(f"긍정 보충 후보 {len(out)}문장 저장 → {POS_CSV}")
     print(out["press"].value_counts().to_string())
-    print("label 열을 판단 규칙대로 채우세요. (긍정이 아니면 다른 라벨을 그대로 적으면 됩니다)")
+    print("label 열에 한 글자로 적어도 됩니다: 긍 / 부 / 중 / 관 (위에서부터 원하는 만큼만)")
+
+
+def recheck():
+    if RECHECK_CSV.exists():
+        raise SystemExit(f"{RECHECK_CSV.name} 가 이미 있습니다. 채운 내용을 덮어쓰지 않도록 중단합니다.")
+    df = load_label_set()
+    m = df[(df["label"] == "중립") & df["sentence"].str.contains(TONE)]
+    out = m[["sent_id", "sentence", "label", "note"]].rename(columns={"label": "old_label"})
+    out["new_label"] = "중립"          # 기본값 = 기존 라벨. 바꿀 문장만 고치면 된다
+    out.to_csv(RECHECK_CSV, index=False, encoding="utf-8-sig")
+    print(f"새 기준으로 다시 볼 문장 {len(out)}개 저장 → {RECHECK_CSV}")
+    print("new_label은 모두 '중립'으로 미리 채워져 있습니다. 좋은 얘기면 '긍', 나쁜 얘기면 '부'로 바꿀 문장만 고치세요.")
+
+
+def apply():
+    r = pd.read_csv(RECHECK_CSV, dtype=str, keep_default_na=False)
+    r["new_label"] = norm(r["new_label"])
+    bad = r[~r["new_label"].isin(LABELS)]
+    if len(bad):
+        raise SystemExit(f"new_label이 비었거나 잘못된 문장이 {len(bad)}건 있습니다. 모두 채운 뒤 다시 실행하세요.")
+    df = load_label_set()
+    shutil.copy(LABEL_CSV, LABEL_CSV.with_suffix(".bak.csv"))
+    if "old_label" not in df.columns:
+        df["old_label"] = ""
+    new = dict(zip(r["sent_id"], r["new_label"]))
+    changed = df["sent_id"].map(new).notna() & (df["sent_id"].map(new) != df["label"])
+    df.loc[changed, "old_label"] = df.loc[changed, "label"]
+    df.loc[changed, "label"] = df.loc[changed, "sent_id"].map(new)
+    df.loc[changed, "note"] = (df.loc[changed, "note"] + " / 기준단순화").str.strip(" /")
+    df.to_csv(LABEL_CSV, index=False, encoding="utf-8-sig")
+    print(f"{len(r)}문장 중 {changed.sum()}문장 라벨 변경")
+    print((r["new_label"].value_counts().reindex(LABELS, fill_value=0)).to_string())
+    dist = df["label"].value_counts().reindex(LABELS, fill_value=0)
+    print("\n[전체 라벨 분포]")
+    for k, v in dist.items():
+        print(f"  {k:<5} {v:>5,}  ({v / len(df):.1%})")
 
 
 def add():
     p = pd.read_csv(POS_CSV, dtype=str, keep_default_na=False)
-    p["label"] = p["label"].str.replace(r"\s+", "", regex=True)
-    bad = p[~p["label"].isin(LABELS)]
+    p["label"] = norm(p["label"])
+    empty = p[p["label"] == ""]
+    bad = p[(p["label"] != "") & ~p["label"].isin(LABELS)]
     if len(bad):
-        raise SystemExit(f"label이 비었거나 잘못된 문장이 {len(bad)}건 있습니다. 모두 채운 뒤 다시 실행하세요.")
+        raise SystemExit(f"잘못 적힌 label이 {len(bad)}건 있습니다 (예: {bad['label'].head(3).tolist()}). 고친 뒤 다시 실행하세요.")
+    if len(empty):
+        print(f"label이 빈 {len(empty)}문장은 추가하지 않습니다. (일부만 라벨링해도 됩니다)")
+    p = p[p["label"].isin(LABELS)]
     df = load_label_set()
     if (df["sample_group"] == "positive_boost").any():
         raise SystemExit("label_set.csv에 이미 positive_boost가 들어 있습니다. 중복 추가를 막기 위해 중단합니다.")
@@ -151,4 +214,5 @@ def add():
 
 
 if __name__ == "__main__":
-    {"blind": blind, "check": check, "positive": positive, "add": add}[MODE]()
+    {"blind": blind, "check": check, "recheck": recheck, "apply": apply,
+     "positive": positive, "add": add}[MODE]()

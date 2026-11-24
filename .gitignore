@@ -5,3 +5,16 @@ data/raw/
 data/processed/
 # 기사 원문 문장이 들어 있어 공개하지 않음 (README 2.4)
 data/labeling/
+
+# KoELECTRA: 사전학습 모델·학습된 모델은 용량이 커서(수백 MB) GitHub에 올리지 않음
+koelectra/koelectra-base-v3-discriminator/
+koelectra/koelectra-small-v3-discriminator/
+koelectra/model_*/
+koelectra/.idea/
+*.bin
+*.safetensors
+*.pt
+# 학습·예측 데이터에도 기사 원문 문장이 들어 있어 공개하지 않음
+koelectra/train_data.txt
+koelectra/test_data.txt
+koelectra/predictions*.csv
